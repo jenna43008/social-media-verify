@@ -1,13 +1,14 @@
 """Social Media Presence & Legitimacy Verification App.
 
-Enter a company domain to automatically:
+Enter a company domain or email address to automatically:
   1. Discover social media profiles (from the company's own website first)
   2. Verify each profile (URL resolves, domain referenced, account age)
   3. Check reviews across Google, BBB, Trustpilot, Glassdoor, G2, Yelp, Capterra
   4. Detect developer/startup signals (GitHub, npm, Product Hunt, Crunchbase, app stores)
-  5. Assess domain intelligence (WHOIS age, DNS, website analysis)
+  5. Assess domain intelligence (WHOIS age, DNS, historical DNS, website analysis)
   6. Compute a risk score (0-100) mapped to Low / Medium / High / Critical tiers
   7. Find employee profiles and fetch latest posts
+  8. (Email mode) Look up the person behind the email — name, LinkedIn, social profiles
 """
 
 import json
@@ -20,10 +21,11 @@ from utils.scraper import scrape_profile, check_domain_in_profile
 from utils.date_checker import extract_creation_indicators, check_predates_denial
 from utils.discovery import discover_social_profiles, discover_employees
 from utils.post_fetcher import fetch_latest_post
-from utils.domain_intel import get_domain_age, scrape_website_social_links, check_dns_records
+from utils.domain_intel import get_domain_age, scrape_website_social_links, check_dns_records, check_historical_dns
 from utils.reviews import discover_reviews, calculate_review_score
 from utils.tech_signals import gather_all_tech_signals, calculate_tech_score
 from utils.risk_engine import calculate_overall_risk
+from utils.email_intel import validate_email, gather_email_person_intel
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -61,8 +63,8 @@ st.markdown("""
 st.markdown('<div class="main-header">Social Media & Legitimacy Verification</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="sub-header">'
-    "Enter a company domain to run a full legitimacy assessment: social profiles, "
-    "reviews, developer signals, domain intelligence, and risk scoring."
+    "Enter a company domain or email address to run a full legitimacy assessment: "
+    "social profiles, reviews, developer signals, domain intelligence, and risk scoring."
     "</div>",
     unsafe_allow_html=True,
 )
@@ -70,13 +72,27 @@ st.markdown(
 # ---------------------------------------------------------------------------
 # Input
 # ---------------------------------------------------------------------------
+input_mode = st.radio(
+    "Input type",
+    ["Company Domain", "Email Address"],
+    horizontal=True,
+    help="Domain mode assesses the company. Email mode also identifies the person behind the email.",
+)
+
 col_input, col_date = st.columns([3, 1])
 with col_input:
-    domain = st.text_input(
-        "Company Domain",
-        placeholder="example.com",
-        help="We'll scan the website, discover social profiles, check reviews, and assess risk.",
-    )
+    if input_mode == "Company Domain":
+        raw_input = st.text_input(
+            "Company Domain",
+            placeholder="example.com",
+            help="We'll scan the website, discover social profiles, check reviews, and assess risk.",
+        )
+    else:
+        raw_input = st.text_input(
+            "Email Address",
+            placeholder="name@example.com",
+            help="We'll identify the person, extract the company domain, and run the full assessment.",
+        )
 with col_date:
     denial_date = st.date_input(
         "Denial Date (optional)",
@@ -89,13 +105,25 @@ run_btn = st.button("Run Full Assessment", type="primary", use_container_width=T
 # ---------------------------------------------------------------------------
 # Main flow
 # ---------------------------------------------------------------------------
-if run_btn and domain and domain.strip():
-    domain = domain.strip().lower()
-    if domain.startswith(("http://", "https://")):
-        domain = domain.split("//", 1)[1]
-    if domain.startswith("www."):
-        domain = domain[4:]
-    domain = domain.rstrip("/")
+if run_btn and raw_input and raw_input.strip():
+    email_address = None
+    email_intel_result = None
+
+    # --- Parse input ---
+    if input_mode == "Email Address":
+        validation = validate_email(raw_input.strip())
+        if not validation["valid"]:
+            st.error(f"Invalid email: {validation['error']}")
+            st.stop()
+        email_address = validation["email"]
+        domain = validation["domain"]
+    else:
+        domain = raw_input.strip().lower()
+        if domain.startswith(("http://", "https://")):
+            domain = domain.split("//", 1)[1]
+        if domain.startswith("www."):
+            domain = domain[4:]
+        domain = domain.rstrip("/")
 
     company_name = domain.split(".")[0].replace("-", " ").replace("_", " ").title()
 
@@ -116,7 +144,15 @@ if run_btn and domain and domain.strip():
     whois_info = get_domain_age(domain)
     dns_info = check_dns_records(domain)
 
-    domain_intel = {"website": website_info, "whois": whois_info, "dns": dns_info}
+    update("Checking web archive history...", 10)
+    historical_dns = check_historical_dns(domain)
+
+    domain_intel = {
+        "website": website_info,
+        "whois": whois_info,
+        "dns": dns_info,
+        "historical_dns": historical_dns,
+    }
 
     # ==================================================================
     # PHASE 2: Social Profile Discovery & Verification
@@ -186,14 +222,23 @@ if run_btn and domain and domain.strip():
     # ==================================================================
     # PHASE 5: Employee Discovery
     # ==================================================================
-    update("Searching for employee profiles...", 80)
+    update("Searching for employee profiles...", 75)
 
     employees = discover_employees(domain, company_name, progress_callback=lambda m: update(m))
 
     # ==================================================================
-    # PHASE 6: Risk Calculation
+    # PHASE 6: Person Intelligence (email mode only)
     # ==================================================================
-    update("Calculating risk score...", 90)
+    if email_address:
+        update("Looking up person associated with email...", 85)
+        email_intel_result = gather_email_person_intel(
+            email_address, progress_callback=lambda m: update(m)
+        )
+
+    # ==================================================================
+    # PHASE 7: Risk Calculation
+    # ==================================================================
+    update("Calculating risk score...", 95)
 
     risk = calculate_overall_risk(
         social_results=social_results,
@@ -201,6 +246,7 @@ if run_btn and domain and domain.strip():
         tech_score=tech_score,
         domain_info=domain_intel,
         denial_date=denial_date,
+        email_intel=email_intel_result,
     )
 
     update("Assessment complete.", 100)
@@ -238,6 +284,8 @@ if run_btn and domain and domain.strip():
     with hero_col3:
         st.markdown("**Assessment Summary**")
         st.markdown(risk["recommendation"])
+        if email_address:
+            st.info(f"Email mode: assessing **{email_address}** (domain: {domain})")
         if risk.get("maturity") == "established":
             st.success("Identified as an established tech company. Standard scoring weights applied — social presence and reviews are expected.")
         elif risk["is_startup"]:
@@ -247,7 +295,6 @@ if run_btn and domain and domain.strip():
     st.markdown("---")
     st.subheader("Score Breakdown")
 
-    breakdown_cols = st.columns(5)
     labels = {
         "social": "Social Media",
         "reviews": "Reviews",
@@ -255,6 +302,10 @@ if run_btn and domain and domain.strip():
         "domain": "Domain Intel",
         "account_age": "Account Age",
     }
+    if "person" in risk["breakdown"]:
+        labels["person"] = "Person"
+
+    breakdown_cols = st.columns(len(labels))
     for i, (key, label) in enumerate(labels.items()):
         bd = risk["breakdown"][key]
         with breakdown_cols[i]:
@@ -274,7 +325,7 @@ if run_btn and domain and domain.strip():
         st.markdown("---")
         st.subheader("Flags & Findings")
         for flag in risk["flags"]:
-            if any(w in flag.lower() for w in ["concern", "weak", "limited", "no review", "no tech", "too new", "poor rating", "below-average", "mediocre", "red flag"]):
+            if any(w in flag.lower() for w in ["concern", "weak", "limited", "no review", "no tech", "too new", "poor rating", "below-average", "mediocre", "red flag", "no digital footprint", "no web archive"]):
                 icon = "&#10060;"
             elif any(w in flag.lower() for w in ["startup", "adjusted"]):
                 icon = "&#9888;&#65039;"
@@ -282,11 +333,82 @@ if run_btn and domain and domain.strip():
                 icon = "&#9989;"
             st.markdown(f'<div class="flag-item">{icon} {flag}</div>', unsafe_allow_html=True)
 
+    # --- Person Intelligence (email mode only) ---
+    if email_intel_result and email_intel_result.get("valid"):
+        st.markdown("---")
+        st.subheader("Person Intelligence")
+        st.caption(f"Email analyzed: {email_intel_result['email']}")
+
+        pi_col1, pi_col2 = st.columns(2)
+
+        with pi_col1:
+            st.markdown("**Identity**")
+            if email_intel_result.get("best_name"):
+                st.markdown(
+                    f'<div class="check-pass">&#9989; Likely name: <b>{email_intel_result["best_name"]}</b></div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    '<div class="check-warn">&#9888;&#65039; Could not determine name from email</div>',
+                    unsafe_allow_html=True,
+                )
+
+            if email_intel_result.get("linkedin_profile"):
+                st.markdown(
+                    f'<div class="check-pass">&#9989; LinkedIn: '
+                    f'<a href="{email_intel_result["linkedin_profile"]}">'
+                    f'{email_intel_result["linkedin_profile"]}</a></div>',
+                    unsafe_allow_html=True,
+                )
+
+            grav = email_intel_result.get("gravatar", {})
+            if grav.get("found"):
+                display = f" — {grav['display_name']}" if grav.get("display_name") else ""
+                st.markdown(
+                    f'<div class="check-pass">&#9989; Gravatar profile found{display}</div>',
+                    unsafe_allow_html=True,
+                )
+
+        with pi_col2:
+            st.markdown("**Digital Footprint**")
+            gh = email_intel_result.get("github", {})
+            if gh.get("found"):
+                commit_str = f" ({gh['commit_count']} commits)" if gh.get("commit_count") else ""
+                st.markdown(
+                    f'<div class="check-pass">&#9989; GitHub: '
+                    f'<a href="{gh.get("profile_url", "#")}">{gh.get("username", "unknown")}</a>'
+                    f'{commit_str}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            for profile in email_intel_result.get("other_profiles", []):
+                st.markdown(
+                    f'<div class="check-info">{profile["platform"].title()}: '
+                    f'<a href="{profile["url"]}">{profile["url"]}</a></div>',
+                    unsafe_allow_html=True,
+                )
+
+            if (
+                not email_intel_result.get("linkedin_profile")
+                and not gh.get("found")
+                and not grav.get("found")
+                and not email_intel_result.get("other_profiles")
+            ):
+                st.markdown(
+                    '<div class="check-fail">&#10060; No digital footprint found for this email</div>',
+                    unsafe_allow_html=True,
+                )
+
+        st.markdown(
+            f"**Person Verification Score:** {email_intel_result.get('person_score', 0)}/100"
+        )
+
     # --- Domain Intelligence ---
     st.markdown("---")
     st.subheader("Domain Intelligence")
 
-    di_col1, di_col2, di_col3 = st.columns(3)
+    di_col1, di_col2, di_col3, di_col4 = st.columns(4)
 
     with di_col1:
         st.markdown("**WHOIS Data**")
@@ -316,6 +438,24 @@ if run_btn and domain and domain.strip():
                 st.markdown(f'<div class="check-info">{link_count} social link(s) found on site</div>', unsafe_allow_html=True)
         else:
             st.markdown('<div class="check-fail">Website unreachable</div>', unsafe_allow_html=True)
+
+    with di_col4:
+        st.markdown("**Web Archive**")
+        if historical_dns.get("found"):
+            years = historical_dns.get("years_of_history") or 0
+            count = historical_dns.get("snapshot_count", 0)
+            earliest = historical_dns.get("earliest_snapshot", "unknown")
+            css = "check-pass" if years >= 2 else "check-warn" if years >= 0.5 else "check-fail"
+            st.markdown(
+                f'<div class="{css}">First seen: {earliest}</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<div class="{css}">{years:.1f} years of history ({count} snapshots)</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown('<div class="check-warn">No web archive history found</div>', unsafe_allow_html=True)
 
     # --- Social Media Profiles ---
     st.markdown("---")
@@ -395,7 +535,6 @@ if run_btn and domain and domain.strip():
             css_class = "check-pass"
             if rev.get("rating"):
                 rating_str = f" — Rating: {rev['rating']}"
-                # Parse rating to determine styling
                 try:
                     rating_val = float(str(rev["rating"]).replace(",", ".").split("/")[0].strip())
                     if rating_val >= 4.0:
@@ -491,6 +630,7 @@ if run_btn and domain and domain.strip():
         "company_name": company_name,
         "denial_date": denial_date.isoformat(),
         "assessment_date": datetime.now().isoformat(),
+        "input_mode": input_mode.lower().replace(" ", "_"),
         "risk": {
             "overall_score": risk["overall_score"],
             "tier": risk["tier"],
@@ -513,6 +653,13 @@ if run_btn and domain and domain.strip():
             "has_mx": dns_info.get("has_mx"),
             "website_reachable": website_info.get("website_reachable"),
             "social_links_on_site": website_info.get("social_links", {}),
+            "historical_dns": {
+                "found": historical_dns.get("found", False),
+                "earliest_snapshot": historical_dns.get("earliest_snapshot"),
+                "latest_snapshot": historical_dns.get("latest_snapshot"),
+                "years_of_history": historical_dns.get("years_of_history"),
+                "snapshot_count": historical_dns.get("snapshot_count", 0),
+            },
         },
         "social_profiles": {
             label: {
@@ -553,6 +700,21 @@ if run_btn and domain and domain.strip():
         "employees": employees,
     }
 
+    # Add email-specific data to export
+    if email_intel_result:
+        export_data["email_input"] = email_address
+        export_data["person_intel"] = {
+            "best_name": email_intel_result.get("best_name"),
+            "linkedin_profile": email_intel_result.get("linkedin_profile"),
+            "gravatar_found": email_intel_result.get("gravatar", {}).get("found", False),
+            "gravatar_display_name": email_intel_result.get("gravatar", {}).get("display_name"),
+            "github_found": email_intel_result.get("github", {}).get("found", False),
+            "github_username": email_intel_result.get("github", {}).get("username"),
+            "other_profiles": email_intel_result.get("other_profiles", []),
+            "person_score": email_intel_result.get("person_score", 0),
+            "flags": email_intel_result.get("flags", []),
+        }
+
     st.download_button(
         label="Download Full Assessment Report (JSON)",
         data=json.dumps(export_data, indent=2, default=str),
@@ -562,4 +724,4 @@ if run_btn and domain and domain.strip():
     )
 
 elif run_btn:
-    st.error("Please enter a company domain.")
+    st.error("Please enter a company domain or email address.")

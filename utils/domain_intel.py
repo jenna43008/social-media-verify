@@ -1,4 +1,4 @@
-"""Domain intelligence: WHOIS age, DNS records, website scraping for social links."""
+"""Domain intelligence: WHOIS age, DNS records, historical DNS, website scraping for social links."""
 
 import re
 import socket
@@ -173,5 +173,89 @@ def check_dns_records(domain: str) -> dict:
             result["has_mx"] = True
     except Exception:
         pass
+
+    return result
+
+
+def check_historical_dns(domain: str) -> dict:
+    """Check Wayback Machine for historical snapshots of the domain.
+
+    Uses the CDX API (same approach as date_checker.py) to find how long
+    the domain has been active on the web.
+
+    Returns:
+        {
+            "found": bool,
+            "earliest_snapshot": str or None (YYYY-MM-DD),
+            "latest_snapshot": str or None (YYYY-MM-DD),
+            "snapshot_count": int,
+            "snapshots": list[dict] (date, status),
+            "years_of_history": float or None,
+            "error": str or None,
+        }
+    """
+    result = {
+        "found": False,
+        "earliest_snapshot": None,
+        "latest_snapshot": None,
+        "snapshot_count": 0,
+        "snapshots": [],
+        "years_of_history": None,
+        "error": None,
+    }
+
+    try:
+        resp = requests.get(
+            "https://web.archive.org/cdx/search/cdx",
+            params={
+                "url": domain,
+                "output": "json",
+                "fl": "timestamp,statuscode",
+                "collapse": "timestamp:6",  # group by year-month
+                "limit": 50,
+            },
+            headers=HEADERS,
+            timeout=TIMEOUT,
+        )
+
+        if resp.status_code != 200:
+            result["error"] = f"Wayback CDX returned HTTP {resp.status_code}"
+            return result
+
+        data = resp.json()
+        if len(data) <= 1:  # first row is header
+            return result
+
+        # Skip header row
+        rows = data[1:]
+        result["found"] = True
+        result["snapshot_count"] = len(rows)
+
+        snapshots = []
+        for row in rows:
+            ts = row[0]  # e.g., "20150301120000"
+            status = row[1] if len(row) > 1 else ""
+            try:
+                snap_date = datetime.strptime(ts[:8], "%Y%m%d").date()
+                snapshots.append({
+                    "date": snap_date.isoformat(),
+                    "status": status or "200",
+                })
+            except (ValueError, IndexError):
+                continue
+
+        result["snapshots"] = snapshots
+
+        if snapshots:
+            result["earliest_snapshot"] = snapshots[0]["date"]
+            result["latest_snapshot"] = snapshots[-1]["date"]
+
+            earliest = date.fromisoformat(snapshots[0]["date"])
+            latest = date.fromisoformat(snapshots[-1]["date"])
+            days = (latest - earliest).days
+            result["years_of_history"] = round(days / 365.25, 1)
+
+    except Exception as e:
+        result["error"] = str(e)
 
     return result

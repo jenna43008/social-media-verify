@@ -22,15 +22,19 @@ def calculate_overall_risk(
     tech_score: dict,
     domain_info: dict,
     denial_date: date | None = None,
+    email_intel: dict | None = None,
 ) -> dict:
     """Calculate the overall risk score and tier.
 
-    Weights:
+    Weights (domain mode):
       - Social media presence:  25%
       - Reviews:                20%
       - Tech/developer signals: 20%
       - Domain intelligence:    20%
       - Account age vs denial:  15%
+
+    When email_intel is provided, a "person" dimension is added:
+      - Social: 20%, Reviews: 18%, Tech: 18%, Domain: 17%, Age: 12%, Person: 15%
 
     For detected tech/startup companies, weights shift to value tech
     signals more and social media less.
@@ -46,6 +50,7 @@ def calculate_overall_risk(
                 "tech": {...},
                 "domain": {...},
                 "account_age": {...},
+                "person": {...},  # only when email_intel provided
             },
             "flags": list[str],
             "is_startup": bool,
@@ -54,28 +59,29 @@ def calculate_overall_risk(
     """
     maturity = tech_score.get("maturity", "non_tech")
     is_early_stage = maturity == "early_stage"
+    has_person = email_intel is not None and email_intel.get("valid", False)
 
-    # Weight adjustments based on company maturity:
-    #   - Established tech (Stripe, Google, etc.): standard weights — they
-    #     SHOULD have social presence and reviews, so hold them to it.
-    #   - Early-stage startup: shift weight toward tech signals because
-    #     limited social/review presence is expected.
-    #   - Non-tech: standard weights.
-    if is_early_stage:
+    # Weight adjustments based on company maturity and input mode.
+    if has_person:
+        if is_early_stage:
+            weights = {
+                "social": 0.12, "reviews": 0.12, "tech": 0.25,
+                "domain": 0.17, "account_age": 0.14, "person": 0.20,
+            }
+        else:
+            weights = {
+                "social": 0.20, "reviews": 0.18, "tech": 0.18,
+                "domain": 0.17, "account_age": 0.12, "person": 0.15,
+            }
+    elif is_early_stage:
         weights = {
-            "social": 0.15,
-            "reviews": 0.15,
-            "tech": 0.30,
-            "domain": 0.20,
-            "account_age": 0.20,
+            "social": 0.15, "reviews": 0.15, "tech": 0.30,
+            "domain": 0.20, "account_age": 0.20,
         }
     else:
         weights = {
-            "social": 0.25,
-            "reviews": 0.20,
-            "tech": 0.20,
-            "domain": 0.20,
-            "account_age": 0.15,
+            "social": 0.25, "reviews": 0.20, "tech": 0.20,
+            "domain": 0.20, "account_age": 0.15,
         }
 
     # --- Social media score ---
@@ -121,6 +127,15 @@ def calculate_overall_risk(
             "weighted": age_score * weights["account_age"],
         },
     }
+
+    # --- Person score (email mode only) ---
+    if has_person:
+        person_val = email_intel.get("person_score", 0)
+        breakdown["person"] = {
+            "score": person_val,
+            "weight": weights["person"],
+            "weighted": person_val * weights["person"],
+        }
 
     overall = sum(b["weighted"] for b in breakdown.values())
 
@@ -169,6 +184,24 @@ def calculate_overall_risk(
         flags.insert(0, "Detected as early-stage startup — weights adjusted to favor tech signals")
     elif maturity == "established":
         flags.insert(0, "Established tech company — standard weight applied across all dimensions")
+
+    # Person flags (email mode)
+    if has_person:
+        flags.extend(email_intel.get("flags", []))
+
+    # Historical DNS flags
+    hist_dns = domain_info.get("historical_dns", {})
+    if hist_dns.get("found"):
+        years = hist_dns.get("years_of_history") or 0
+        count = hist_dns.get("snapshot_count", 0)
+        if years >= 5:
+            flags.append(f"Strong web archive history ({years:.0f} years, {count} snapshots)")
+        elif years >= 1:
+            flags.append(f"Web archive history: {years:.1f} years ({count} snapshots)")
+        else:
+            flags.append(f"Limited web archive history ({count} snapshots)")
+    else:
+        flags.append("No web archive history found — domain may be very new")
 
     # Generate recommendation
     recommendation = _generate_recommendation(overall, tier, is_early_stage, maturity, flags, breakdown)
@@ -295,6 +328,21 @@ def _calculate_domain_score(domain_info: dict) -> float:
     # Registrar (known registrars add confidence)
     if whois_info.get("registrar"):
         score += 5
+
+    # Historical DNS (Wayback Machine snapshots)
+    hist_dns = domain_info.get("historical_dns", {})
+    if hist_dns.get("found"):
+        years = hist_dns.get("years_of_history") or 0
+        if years >= 10:
+            score += 15
+        elif years >= 5:
+            score += 12
+        elif years >= 2:
+            score += 8
+        elif years >= 1:
+            score += 4
+        else:
+            score += 2
 
     return min(score, 100)
 
