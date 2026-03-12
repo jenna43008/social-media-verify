@@ -25,6 +25,20 @@ TIMEOUT = 12
 # Email validation & domain extraction
 # ---------------------------------------------------------------------------
 
+PERSONAL_EMAIL_PROVIDERS = {
+    "gmail.com", "googlemail.com", "yahoo.com", "yahoo.co.uk", "yahoo.fr",
+    "hotmail.com", "hotmail.co.uk", "outlook.com", "outlook.fr",
+    "live.com", "live.co.uk", "msn.com", "aol.com",
+    "icloud.com", "me.com", "mac.com",
+    "protonmail.com", "proton.me", "pm.me",
+    "mail.com", "zoho.com", "yandex.com", "yandex.ru",
+    "gmx.com", "gmx.net", "fastmail.com", "tutanota.com",
+    "comcast.net", "att.net", "verizon.net", "sbcglobal.net",
+    "bellsouth.net", "charter.net", "cox.net",
+    "orange.fr", "free.fr", "wanadoo.fr", "laposte.net",
+}
+
+
 def validate_email(email: str) -> dict:
     """Validate email format and extract domain.
 
@@ -34,11 +48,15 @@ def validate_email(email: str) -> dict:
             "email": str (normalized),
             "local_part": str,
             "domain": str,
+            "is_personal_provider": bool,
             "error": str or None,
         }
     """
     email = email.strip().lower()
-    result = {"valid": False, "email": email, "local_part": "", "domain": "", "error": None}
+    result = {
+        "valid": False, "email": email, "local_part": "", "domain": "",
+        "is_personal_provider": False, "error": None,
+    }
 
     pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
     if not re.match(pattern, email):
@@ -49,6 +67,7 @@ def validate_email(email: str) -> dict:
     result["valid"] = True
     result["local_part"] = local_part
     result["domain"] = domain
+    result["is_personal_provider"] = domain.lower() in PERSONAL_EMAIL_PROVIDERS
     return result
 
 
@@ -108,18 +127,55 @@ def extract_name_from_email(local_part: str) -> dict:
                 "pattern": "first-last",
             })
 
-    # Pattern 4: single word — try initial + rest as last name
-    if not candidates and local_part.isalpha() and len(local_part) >= 3:
+    # Pattern 4: firstlastNN (e.g., jennawebb79 → Jenna + Webb)
+    # Strip trailing/leading digits, then try to split into first + last
+    alpha_only = re.sub(r"\d+$", "", local_part)
+    alpha_only = re.sub(r"^\d+", "", alpha_only)
+
+    if not candidates and alpha_only.isalpha() and len(alpha_only) >= 5:
+        # Try all valid splits and pick the most balanced one
+        # Prefer 4-6 char first names with 4-8 char last names
+        possible_splits = []
+        for i in range(3, min(9, len(alpha_only) - 2)):
+            first, last = alpha_only[:i], alpha_only[i:]
+            if len(last) >= 3:
+                # Score: prefer 4-6 char first names (most common English names)
+                score = 0
+                if 4 <= len(first) <= 6:
+                    score += 3  # ideal first name length
+                elif len(first) == 3:
+                    score += 1  # short but valid (e.g., "jen", "tom")
+                if 4 <= len(last) <= 8:
+                    score += 2  # ideal last name length
+                elif len(last) == 3:
+                    score += 1
+                # Tiebreaker: prefer vowel at end of first name (jenna > jenn)
+                ends_vowel = 1 if first[-1] in "aeiouy" else 0
+                possible_splits.append((score, ends_vowel, first, last))
+
+        if possible_splits:
+            possible_splits.sort(key=lambda x: (-x[0], -x[1]))
+            _, _, best_first, best_last = possible_splits[0]
+            candidates.append({
+                "first": best_first.title(),
+                "last": best_last.title(),
+                "confidence": "medium",
+                "pattern": "firstlastNN",
+            })
+
+    # Pattern 5: single word — try initial + rest as last name
+    clean = alpha_only if alpha_only and alpha_only.isalpha() else local_part
+    if not candidates and clean.isalpha() and len(clean) >= 3:
         # First letter + rest (e.g., "glairet" → G + Lairet)
         candidates.append({
-            "first": local_part[0].upper(),
-            "last": local_part[1:].title(),
+            "first": clean[0].upper(),
+            "last": clean[1:].title(),
             "confidence": "low",
             "pattern": "initial_rest",
         })
         # Also keep the full prefix as a search term
         candidates.append({
-            "first": local_part.title(),
+            "first": clean.title(),
             "last": "",
             "confidence": "low",
             "pattern": "single_word",

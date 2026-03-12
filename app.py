@@ -112,6 +112,7 @@ if run_btn and raw_input and raw_input.strip():
     email_intel_result = None
 
     # --- Parse input ---
+    is_personal_email = False
     if input_mode == "Email Address":
         validation = validate_email(raw_input.strip())
         if not validation["valid"]:
@@ -119,6 +120,7 @@ if run_btn and raw_input and raw_input.strip():
             st.stop()
         email_address = validation["email"]
         domain = validation["domain"]
+        is_personal_email = validation.get("is_personal_provider", False)
     else:
         domain = raw_input.strip().lower()
         if domain.startswith(("http://", "https://")):
@@ -136,6 +138,91 @@ if run_btn and raw_input and raw_input.strip():
         status.caption(msg)
         if pct is not None:
             progress_bar.progress(pct)
+
+    # ==================================================================
+    # PERSONAL EMAIL — skip domain assessment, person lookup only
+    # ==================================================================
+    if is_personal_email:
+        st.info(f"**{domain}** is a personal email provider — skipping company domain assessment. Running person lookup only.")
+
+        update("Looking up person associated with email...", 20)
+        email_intel_result = gather_email_person_intel(
+            email_address, progress_callback=lambda m: update(m)
+        )
+        update("Complete.", 100)
+        progress_bar.empty()
+        status.empty()
+
+        st.markdown("---")
+        st.subheader("Person Intelligence")
+
+        if email_intel_result:
+            best_name = email_intel_result.get("best_name")
+            p_score = email_intel_result.get("person_score", 0)
+
+            # Score display
+            score_css = "color: #22c55e" if p_score >= 60 else "color: #f59e0b" if p_score >= 30 else "color: #ef4444"
+            st.markdown(
+                f'<div style="text-align:center">'
+                f'<span style="font-size:3rem;font-weight:bold;{score_css}">{p_score}</span>'
+                f'<br><span style="color:#888">Person Score (0-100)</span></div>',
+                unsafe_allow_html=True,
+            )
+
+            id_col, fp_col = st.columns(2)
+
+            with id_col:
+                st.markdown("**Identity**")
+                if best_name:
+                    st.markdown(f'<div class="check-pass">&#128100; <b>Likely name:</b> {best_name}</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown('<div class="check-warn">&#128100; Could not determine name</div>', unsafe_allow_html=True)
+                st.caption(f"Email: {email_address}")
+
+            with fp_col:
+                st.markdown("**Digital Footprint**")
+                gravatar = email_intel_result.get("gravatar", {})
+                if gravatar.get("found"):
+                    grav_name = gravatar.get("display_name", "")
+                    st.markdown(f'<div class="check-pass">&#9989; Gravatar: {grav_name}</div>', unsafe_allow_html=True)
+                gh = email_intel_result.get("github", {})
+                if gh.get("found"):
+                    st.markdown(f'<div class="check-pass">&#9989; GitHub: {gh.get("username", "")}</div>', unsafe_allow_html=True)
+                li = email_intel_result.get("linkedin_profile")
+                if li:
+                    st.markdown(f'<div class="check-pass">&#9989; LinkedIn: <a href="{li}">{li}</a></div>', unsafe_allow_html=True)
+                other = email_intel_result.get("other_profiles", [])
+                for op in other:
+                    st.markdown(f'<div class="check-info">&#128279; {op.get("platform", "Profile")}: <a href="{op["url"]}">{op["url"]}</a></div>', unsafe_allow_html=True)
+
+            # Flags
+            p_flags = email_intel_result.get("flags", [])
+            if p_flags:
+                st.markdown("---")
+                st.subheader("Findings")
+                for flag in p_flags:
+                    st.markdown(f"&#9989; {flag}")
+
+            # Export
+            st.markdown("---")
+            export_data = {
+                "email": email_address,
+                "personal_email_provider": True,
+                "domain": domain,
+                "assessment_date": datetime.now().isoformat(),
+                "person_intel": email_intel_result,
+            }
+            st.download_button(
+                label="Download Person Report (JSON)",
+                data=json.dumps(export_data, indent=2, default=str),
+                file_name=f"person_{email_address.replace('@', '_at_')}_{date.today().isoformat()}.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+        else:
+            st.warning("Could not gather person intelligence for this email.")
+
+        st.stop()  # End here — don't continue to domain assessment
 
     # ==================================================================
     # PHASE 1: Domain Intelligence
@@ -527,7 +614,10 @@ if run_btn and raw_input and raw_input.strip():
                 post = r["latest_post"]
                 if post.get("found") and post.get("text"):
                     display = post["text"][:250] + ("..." if len(post["text"]) > 250 else "")
-                    st.markdown("**Latest Post:**")
+                    date_label = ""
+                    if post.get("date"):
+                        date_label = f" — **Posted: {post['date']}**"
+                    st.markdown(f"**Latest Post:**{date_label}")
                     st.markdown(f'<div class="post-card">{display}</div>', unsafe_allow_html=True)
                     if post.get("source"):
                         st.caption(f"Source: {post['source']}")

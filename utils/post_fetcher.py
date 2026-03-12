@@ -5,6 +5,7 @@ from datetime import datetime
 
 import requests
 from bs4 import BeautifulSoup
+from dateutil import parser as dateutil_parser
 
 HEADERS = {
     "User-Agent": (
@@ -17,6 +18,20 @@ HEADERS = {
 }
 
 TIMEOUT = 15
+
+
+def _normalize_post_date(raw_date: str | None) -> str | None:
+    """Parse a raw date string into ISO format (YYYY-MM-DD).
+
+    Returns None if the date can't be parsed.
+    """
+    if not raw_date:
+        return None
+    try:
+        dt = dateutil_parser.parse(str(raw_date), fuzzy=True)
+        return dt.strftime("%Y-%m-%d")
+    except (ValueError, OverflowError, TypeError):
+        return raw_date  # return as-is if unparseable
 
 
 def fetch_latest_post(url: str, html: str | None, platform: str) -> dict:
@@ -60,6 +75,7 @@ def fetch_latest_post(url: str, html: str | None, platform: str) -> dict:
     # Strategy 1: JSON-LD structured data (works for many platforms)
     post = _extract_from_jsonld(soup)
     if post["found"]:
+        post["date"] = _normalize_post_date(post.get("date"))
         return post
 
     # Strategy 2: Platform-specific extraction
@@ -73,16 +89,19 @@ def fetch_latest_post(url: str, html: str | None, platform: str) -> dict:
         post = _extract_instagram_post(soup, url)
 
     if post["found"]:
+        post["date"] = _normalize_post_date(post.get("date"))
         return post
 
     # Strategy 3: RSS feed check (some platforms / pages offer RSS)
     post = _check_rss_feed(url, platform)
     if post["found"]:
+        post["date"] = _normalize_post_date(post.get("date"))
         return post
 
     # Strategy 4: Open Graph / meta tag fallback (latest shared content)
     post = _extract_from_og_tags(soup)
     if post["found"]:
+        post["date"] = _normalize_post_date(post.get("date"))
         return post
 
     return result

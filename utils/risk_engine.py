@@ -4,7 +4,9 @@ Combines signals from social media, reviews, tech presence, and domain
 intelligence into a single risk score (0-100) mapped to tiers.
 """
 
-from datetime import date
+from datetime import date, datetime
+
+from dateutil import parser as dateutil_parser
 
 
 # Risk tiers
@@ -146,27 +148,41 @@ def calculate_overall_risk(
             tier = t_name
             break
 
-    # Collect all flags
+    # Collect all flags — descriptive and specific
     flags = []
     flags.extend(review_score.get("flags", []))
     flags.extend(tech_score.get("flags", []))
 
+    # Domain age flag (include actual age when available)
     if domain_score < 30:
-        flags.append("Domain age or registration raises concerns")
+        whois = domain_info.get("whois", {})
+        age_days = whois.get("age_days")
+        if age_days is not None:
+            age_years = age_days / 365
+            if age_years < 1:
+                flags.append(f"Domain registered only {age_days} days ago — very new")
+            else:
+                flags.append(f"Domain registered {age_years:.1f} years ago — raises concerns")
+        else:
+            flags.append("Domain age or WHOIS data unavailable — raises concerns")
+
+    # Social presence flag (include count)
+    total_profiles = len(social_results)
     if social_score < 20:
-        flags.append("Very weak social media presence")
-    if age_score < 30:
-        flags.append("Social accounts may be too new relative to denial date")
+        flags.append(f"Only {total_profiles} of 7 social platforms found — very weak presence")
+    elif total_profiles == 1:
+        platform_name = list(social_results.keys())[0] if social_results else "unknown"
+        flags.append(f"Only 1 social profile found ({platform_name}) — limited presence")
+
+    if age_score < 30 and social_results:
+        flags.append("Social accounts may have been created after denial date — possibly reactionary")
 
     # Follower count flags
     max_followers = 0
-    has_posts = False
     for label, r in social_results.items():
         followers = r.get("profile_data", {}).get("followers")
         if followers and followers > max_followers:
             max_followers = followers
-        if r.get("latest_post", {}).get("found"):
-            has_posts = True
 
     if max_followers >= 10_000:
         flags.append(f"Strong social following ({max_followers:,} followers)")
@@ -175,15 +191,57 @@ def calculate_overall_risk(
     elif max_followers > 0 and max_followers < 100:
         flags.append(f"Very small social following ({max_followers:,} followers)")
 
-    if has_posts:
-        flags.append("Recent posting activity detected")
-    elif social_results:
-        flags.append("No recent posting activity found — may indicate inactive accounts")
+    # Posting activity flags — recency-aware and per-platform
+    post_details = []
+    most_recent_days = None
+    most_recent_platform = None
+    stale_platforms = []
 
+    for label, r in social_results.items():
+        post = r.get("latest_post", {})
+        if post.get("found"):
+            days = _days_since_post(post.get("date"))
+            if days is not None:
+                post_details.append((label, days))
+                if most_recent_days is None or days < most_recent_days:
+                    most_recent_days = days
+                    most_recent_platform = label
+                if days > 180:
+                    stale_platforms.append((label, days))
+            else:
+                post_details.append((label, None))
+
+    if most_recent_days is not None:
+        recency = _describe_recency(most_recent_days)
+        if most_recent_days < 30:
+            flags.append(f"Recent posting activity: {most_recent_platform} ({recency})")
+        elif most_recent_days < 90:
+            flags.append(f"Moderate posting activity: last post on {most_recent_platform} ({recency})")
+        elif most_recent_days < 365:
+            flags.append(f"Infrequent posting: last post on {most_recent_platform} ({recency})")
+        else:
+            flags.append(f"Stale posting activity: last post on {most_recent_platform} ({recency})")
+    elif post_details:
+        # Posts found but no dates parseable
+        flags.append("Posting activity detected (dates unavailable)")
+    elif social_results:
+        flags.append("No posts found on any platform — accounts may be inactive or private")
+
+    # Flag significant gaps: platforms with stale posts while others are active
+    for plat, days in stale_platforms:
+        if most_recent_days is not None and days - most_recent_days > 180:
+            flags.append(f"Significant gap: {plat} last posted {_describe_recency(days)} while {most_recent_platform} posted {_describe_recency(most_recent_days)}")
+
+    # Startup / maturity flag (include what triggered it)
     if is_early_stage:
-        flags.insert(0, "Detected as early-stage startup — weights adjusted to favor tech signals")
+        gh = tech_score.get("signals", {}).get("github", {}) if isinstance(tech_score.get("signals"), dict) else {}
+        signals_found = tech_score.get("signals_found", 0)
+        detail_parts = []
+        if signals_found:
+            detail_parts.append(f"{signals_found} tech signal{'s' if signals_found != 1 else ''}")
+        flags.insert(0, f"Detected as early-stage startup ({', '.join(detail_parts) if detail_parts else 'limited tech presence'}) — weights adjusted")
     elif maturity == "established":
-        flags.insert(0, "Established tech company — standard weight applied across all dimensions")
+        flags.insert(0, "Established tech company — standard weights applied across all dimensions")
 
     # Person flags (email mode)
     if has_person:
@@ -257,9 +315,25 @@ def _calculate_social_score(social_results: dict) -> float:
             else:
                 score += 2
 
-        # Posting activity: having a recent post is a positive signal
-        if r.get("latest_post", {}).get("found"):
-            score += 5
+        # Posting activity: recency-aware scoring
+        post = r.get("latest_post", {})
+        if post.get("found"):
+            days_ago = _days_since_post(post.get("date"))
+            if days_ago is not None:
+                if days_ago < 7:
+                    score += 15
+                elif days_ago < 30:
+                    score += 12
+                elif days_ago < 90:
+                    score += 8
+                elif days_ago < 180:
+                    score += 4
+                elif days_ago < 365:
+                    score += 2
+                # > 365 days: stale, no bonus
+            else:
+                # Post found but date unknown — moderate bonus
+                score += 5
 
     # LinkedIn follower count bonus (strong legitimacy signal)
     # Look across all profiles for the highest follower count
@@ -281,6 +355,37 @@ def _calculate_social_score(social_results: dict) -> float:
         score += 3   # minimal
 
     return min(score, 100)
+
+
+def _days_since_post(date_str: str | None) -> int | None:
+    """Calculate the number of days between a post date and today."""
+    if not date_str:
+        return None
+    try:
+        dt = dateutil_parser.parse(str(date_str), fuzzy=True)
+        delta = datetime.now() - dt.replace(tzinfo=None)
+        return max(0, delta.days)
+    except (ValueError, OverflowError, TypeError):
+        return None
+
+
+def _describe_recency(days: int) -> str:
+    """Convert days-ago into a human-readable recency label."""
+    if days < 1:
+        return "today"
+    elif days == 1:
+        return "yesterday"
+    elif days < 7:
+        return f"{days} days ago"
+    elif days < 30:
+        weeks = days // 7
+        return f"{weeks} week{'s' if weeks > 1 else ''} ago"
+    elif days < 365:
+        months = days // 30
+        return f"{months} month{'s' if months > 1 else ''} ago"
+    else:
+        years = days / 365
+        return f"{years:.1f} years ago"
 
 
 def _calculate_domain_score(domain_info: dict) -> float:
