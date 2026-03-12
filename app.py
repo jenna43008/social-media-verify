@@ -274,7 +274,7 @@ if run_btn and domain and domain.strip():
         st.markdown("---")
         st.subheader("Flags & Findings")
         for flag in risk["flags"]:
-            if any(w in flag.lower() for w in ["concern", "weak", "limited", "no review", "no tech", "too new"]):
+            if any(w in flag.lower() for w in ["concern", "weak", "limited", "no review", "no tech", "too new", "poor rating", "below-average", "mediocre", "red flag"]):
                 icon = "&#10060;"
             elif any(w in flag.lower() for w in ["startup", "adjusted"]):
                 icon = "&#9888;&#65039;"
@@ -334,6 +334,18 @@ if run_btn and domain and domain.strip():
                     st.markdown(f'<div class="check-fail">&#10060; URL Does Not Resolve — {r["url_check"]["error"]}</div>', unsafe_allow_html=True)
                     continue
 
+                # Follower count
+                followers = r.get("profile_data", {}).get("followers")
+                if followers is not None:
+                    if followers >= 10_000:
+                        st.markdown(f'<div class="check-pass">&#9989; <b>{followers:,} followers</b> — strong audience</div>', unsafe_allow_html=True)
+                    elif followers >= 1_000:
+                        st.markdown(f'<div class="check-pass">&#9989; <b>{followers:,} followers</b> — established audience</div>', unsafe_allow_html=True)
+                    elif followers >= 100:
+                        st.markdown(f'<div class="check-info">&#128101; <b>{followers:,} followers</b> — growing audience</div>', unsafe_allow_html=True)
+                    else:
+                        st.markdown(f'<div class="check-warn">&#128101; <b>{followers:,} followers</b> — limited audience</div>', unsafe_allow_html=True)
+
                 dc = r["domain_check"]
                 if dc["found"]:
                     locs = ", ".join(dc["locations"][:3])
@@ -365,12 +377,38 @@ if run_btn and domain and domain.strip():
     found_reviews = {k: v for k, v in reviews.items() if v["found"]}
     not_found = {k: v for k, v in reviews.items() if not v["found"]}
 
+    # Show average rating summary if available
+    if review_score.get("average_rating") is not None:
+        avg = review_score["average_rating"]
+        avg_css = "check-pass" if avg >= 4.0 else "check-warn" if avg >= 3.0 else "check-fail"
+        st.markdown(
+            f'<div class="{avg_css}">&#11088; <b>Average Rating: {avg:.1f}/5</b> '
+            f'across {review_score["platforms_with_ratings"]} platform(s) '
+            f'{"— strong signal" if avg >= 4.0 else "— below 4 stars, weighed negatively" if avg < 4.0 else ""}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
     if found_reviews:
         for key, rev in found_reviews.items():
-            rating_str = f" — Rating: {rev['rating']}" if rev.get("rating") else ""
+            rating_str = ""
+            css_class = "check-pass"
+            if rev.get("rating"):
+                rating_str = f" — Rating: {rev['rating']}"
+                # Parse rating to determine styling
+                try:
+                    rating_val = float(str(rev["rating"]).replace(",", ".").split("/")[0].strip())
+                    if rating_val >= 4.0:
+                        css_class = "check-pass"
+                    elif rating_val >= 3.0:
+                        css_class = "check-warn"
+                    else:
+                        css_class = "check-fail"
+                except (ValueError, IndexError):
+                    pass
             count_str = f" ({rev['review_count']} reviews)" if rev.get("review_count") else ""
             st.markdown(
-                f'<div class="check-pass">{rev["icon"]} <b>{rev["label"]}</b>{rating_str}{count_str} '
+                f'<div class="{css_class}">{rev["icon"]} <b>{rev["label"]}</b>{rating_str}{count_str} '
                 f'— <a href="{rev["url"]}">View</a></div>',
                 unsafe_allow_html=True,
             )

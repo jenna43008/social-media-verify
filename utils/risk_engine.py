@@ -143,6 +143,28 @@ def calculate_overall_risk(
     if age_score < 30:
         flags.append("Social accounts may be too new relative to denial date")
 
+    # Follower count flags
+    max_followers = 0
+    has_posts = False
+    for label, r in social_results.items():
+        followers = r.get("profile_data", {}).get("followers")
+        if followers and followers > max_followers:
+            max_followers = followers
+        if r.get("latest_post", {}).get("found"):
+            has_posts = True
+
+    if max_followers >= 10_000:
+        flags.append(f"Strong social following ({max_followers:,} followers)")
+    elif max_followers >= 1_000:
+        flags.append(f"Established social following ({max_followers:,} followers)")
+    elif max_followers > 0 and max_followers < 100:
+        flags.append(f"Very small social following ({max_followers:,} followers)")
+
+    if has_posts:
+        flags.append("Recent posting activity detected")
+    elif social_results:
+        flags.append("No recent posting activity found — may indicate inactive accounts")
+
     if is_early_stage:
         flags.insert(0, "Detected as early-stage startup — weights adjusted to favor tech signals")
     elif maturity == "established":
@@ -164,39 +186,66 @@ def calculate_overall_risk(
 
 
 def _calculate_social_score(social_results: dict) -> float:
-    """Score social media presence (0-100)."""
+    """Score social media presence (0-100).
+
+    Factors:
+      - Number of profiles found
+      - URL resolves, domain referenced, latest post found
+      - LinkedIn follower count (strong legitimacy signal)
+      - Posting activity (recent posts = active, engaged company)
+    """
     if not social_results:
         return 0
 
     score = 0.0
     total_profiles = len(social_results)
 
-    # Points for number of profiles found
+    # Points for number of profiles found (max 20)
     if total_profiles >= 4:
-        score += 30
+        score += 20
     elif total_profiles >= 3:
-        score += 25
+        score += 16
     elif total_profiles >= 2:
-        score += 18
+        score += 12
     elif total_profiles >= 1:
-        score += 10
+        score += 6
 
-    # Points for verification results
+    # Points for verification results per profile
     for label, r in social_results.items():
         if r.get("url_check", {}).get("resolved"):
-            score += 5
+            score += 3
 
         domain_check = r.get("domain_check", {})
         if domain_check.get("found"):
             if domain_check.get("confidence") == "high":
-                score += 15
-            elif domain_check.get("confidence") == "medium":
                 score += 8
-            else:
+            elif domain_check.get("confidence") == "medium":
                 score += 4
+            else:
+                score += 2
 
+        # Posting activity: having a recent post is a positive signal
         if r.get("latest_post", {}).get("found"):
             score += 5
+
+    # LinkedIn follower count bonus (strong legitimacy signal)
+    # Look across all profiles for the highest follower count
+    max_followers = 0
+    for label, r in social_results.items():
+        followers = r.get("profile_data", {}).get("followers")
+        if followers and followers > max_followers:
+            max_followers = followers
+
+    if max_followers >= 100_000:
+        score += 25  # major brand
+    elif max_followers >= 10_000:
+        score += 20  # well-established
+    elif max_followers >= 1_000:
+        score += 14  # growing presence
+    elif max_followers >= 100:
+        score += 8   # small but real
+    elif max_followers >= 10:
+        score += 3   # minimal
 
     return min(score, 100)
 

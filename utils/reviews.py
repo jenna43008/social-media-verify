@@ -270,50 +270,126 @@ def _get_platform_domain(key: str) -> str | None:
     return mapping.get(key)
 
 
+def _parse_rating(raw: str | None) -> float | None:
+    """Parse a star rating string into a float (e.g., '4.5', '4,5', '3.8/5')."""
+    if not raw:
+        return None
+    text = str(raw).strip()
+    # Handle "X/5" format
+    text = re.sub(r"\s*/\s*5\s*$", "", text)
+    # Handle comma decimals (European style)
+    text = text.replace(",", ".")
+    try:
+        val = float(text)
+        if 0 <= val <= 5:
+            return val
+    except ValueError:
+        pass
+    # Try to extract a number
+    match = re.search(r"(\d+\.?\d*)", text)
+    if match:
+        val = float(match.group(1))
+        if 0 <= val <= 5:
+            return val
+    return None
+
+
+def _rating_quality_points(rating: float) -> tuple[float, str | None]:
+    """Score a star rating: 4+ is positive, below 4 is progressively worse.
+
+    Returns (points, flag_message_or_None).
+      - 4.5-5.0  → +15 pts (excellent)
+      - 4.0-4.4  → +10 pts (good)
+      - 3.5-3.9  → +2 pts  (acceptable but not strong)
+      - 3.0-3.4  → -5 pts  (concerning)
+      - 2.0-2.9  → -12 pts (poor)
+      - <2.0     → -20 pts (very poor)
+    """
+    if rating >= 4.5:
+        return 15, None
+    elif rating >= 4.0:
+        return 10, None
+    elif rating >= 3.5:
+        return 2, f"Mediocre rating ({rating:.1f}/5) — not a strong legitimacy signal"
+    elif rating >= 3.0:
+        return -5, f"Below-average rating ({rating:.1f}/5) — potential concerns"
+    elif rating >= 2.0:
+        return -12, f"Poor rating ({rating:.1f}/5) — negative legitimacy signal"
+    else:
+        return -20, f"Very poor rating ({rating:.1f}/5) — significant red flag"
+
+
 def calculate_review_score(reviews: dict) -> dict:
     """Calculate a review-based legitimacy score.
+
+    Scoring philosophy:
+      - Having review presence is positive (shows the company is real).
+      - Ratings of 4+ stars are positive signals.
+      - Ratings below 4 stars are progressively worse.
 
     Returns:
         {
             "score": float (0-100),
             "platforms_found": int,
             "platforms_with_ratings": int,
+            "average_rating": float | None,
             "flags": list[str],
         }
     """
     platforms_found = sum(1 for r in reviews.values() if r["found"])
-    platforms_with_ratings = sum(
-        1 for r in reviews.values() if r["found"] and r.get("rating")
-    )
+    platforms_with_ratings = 0
+    parsed_ratings = []
+
+    for r in reviews.values():
+        if r["found"] and r.get("rating"):
+            parsed = _parse_rating(r["rating"])
+            if parsed is not None:
+                platforms_with_ratings += 1
+                parsed_ratings.append(parsed)
 
     flags = []
     score = 0.0
 
-    # Base score: having reviews at all
+    # --- Base score: having review presence at all ---
     if platforms_found == 0:
         score = 10
         flags.append("No review presence found on any platform")
     elif platforms_found == 1:
-        score = 30
+        score = 25
         flags.append("Limited review presence (1 platform)")
     elif platforms_found == 2:
-        score = 50
+        score = 40
     elif platforms_found >= 3:
-        score = 70
+        score = 55
 
-    # Bonus for ratings
-    if platforms_with_ratings >= 2:
-        score += 15
-    elif platforms_with_ratings == 1:
-        score += 8
+    # --- Rating quality: 4+ stars positive, below 4 progressively worse ---
+    if parsed_ratings:
+        avg_rating = sum(parsed_ratings) / len(parsed_ratings)
 
-    # BBB accreditation bonus
+        # Per-platform rating adjustments
+        for rating in parsed_ratings:
+            pts, flag = _rating_quality_points(rating)
+            score += pts
+            if flag:
+                flags.append(flag)
+
+        # Summary flag for average
+        if avg_rating >= 4.0:
+            flags.append(f"Strong average rating ({avg_rating:.1f}/5 across {len(parsed_ratings)} platform{'s' if len(parsed_ratings) > 1 else ''})")
+        elif avg_rating >= 3.5:
+            flags.append(f"Average rating ({avg_rating:.1f}/5) — room for concern")
+    else:
+        avg_rating = None
+        if platforms_found > 0:
+            flags.append("Review platforms found but no numeric ratings extracted")
+
+    # --- BBB accreditation bonus ---
     bbb = reviews.get("bbb", {})
     if bbb.get("found") and bbb.get("extra", {}).get("accredited"):
         score += 15
         flags.append("BBB Accredited")
     elif bbb.get("found") and bbb.get("rating"):
-        grade = bbb["rating"].upper()
+        grade = str(bbb["rating"]).upper()
         if grade.startswith("A"):
             score += 10
         elif grade.startswith("B"):
@@ -326,5 +402,6 @@ def calculate_review_score(reviews: dict) -> dict:
         "score": min(max(score, 0), 100),
         "platforms_found": platforms_found,
         "platforms_with_ratings": platforms_with_ratings,
+        "average_rating": round(avg_rating, 2) if avg_rating is not None else None,
         "flags": flags,
     }

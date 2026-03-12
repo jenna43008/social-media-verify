@@ -46,6 +46,9 @@ def scrape_profile(html: str, platform: str | None = None) -> dict:
     # Full visible text for fallback
     raw_text = soup.get_text(separator=" ", strip=True)
 
+    # Extract follower count (platform-specific)
+    followers = _extract_follower_count(soup, description, raw_text, platform)
+
     return {
         "title": title,
         "description": description,
@@ -53,6 +56,7 @@ def scrape_profile(html: str, platform: str | None = None) -> dict:
         "links_found": links_found,
         "raw_text": raw_text,
         "og_data": og_data,
+        "followers": followers,
     }
 
 
@@ -129,6 +133,79 @@ def _extract_bio(soup: BeautifulSoup, platform: str | None) -> str:
                     bio_parts.append(text)
 
     return " ".join(bio_parts)
+
+
+def _extract_follower_count(
+    soup: BeautifulSoup, description: str, raw_text: str, platform: str | None
+) -> int | None:
+    """Extract follower/like count from a social media profile page.
+
+    LinkedIn meta descriptions follow the pattern:
+        "Company Name | 1,317,392 followers on LinkedIn."
+    Facebook pages may show likes/followers similarly.
+    """
+    # LinkedIn: "X followers on LinkedIn"
+    if platform == "linkedin":
+        patterns = [
+            r"([\d,]+)\s+followers?\s+on\s+LinkedIn",
+            r"([\d,]+)\s+followers?",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, description, re.IGNORECASE)
+            if match:
+                return int(match.group(1).replace(",", ""))
+            match = re.search(pattern, raw_text, re.IGNORECASE)
+            if match:
+                return int(match.group(1).replace(",", ""))
+
+    # Facebook: "X likes" or "X followers"
+    elif platform == "facebook":
+        for pattern in [r"([\d,]+)\s+(?:likes?|followers?)"]:
+            match = re.search(pattern, description, re.IGNORECASE)
+            if match:
+                return int(match.group(1).replace(",", ""))
+            match = re.search(pattern, raw_text, re.IGNORECASE)
+            if match:
+                return int(match.group(1).replace(",", ""))
+
+    # Twitter/X: "X Followers"
+    elif platform == "twitter":
+        for pattern in [r"([\d,.]+[KMkm]?)\s+Followers?"]:
+            match = re.search(pattern, raw_text, re.IGNORECASE)
+            if match:
+                return _parse_abbreviated_number(match.group(1))
+
+    # Instagram: "X Followers"
+    elif platform == "instagram":
+        for pattern in [r"([\d,.]+[KMkm]?)\s+Followers?"]:
+            match = re.search(pattern, description, re.IGNORECASE)
+            if match:
+                return _parse_abbreviated_number(match.group(1))
+            match = re.search(pattern, raw_text, re.IGNORECASE)
+            if match:
+                return _parse_abbreviated_number(match.group(1))
+
+    # Generic fallback
+    for pattern in [r"([\d,]+)\s+followers?"]:
+        match = re.search(pattern, description, re.IGNORECASE)
+        if match:
+            return int(match.group(1).replace(",", ""))
+
+    return None
+
+
+def _parse_abbreviated_number(text: str) -> int | None:
+    """Parse numbers like '1.3K', '2.5M', '12,345'."""
+    text = text.strip().replace(",", "")
+    try:
+        if text.upper().endswith("K"):
+            return int(float(text[:-1]) * 1_000)
+        elif text.upper().endswith("M"):
+            return int(float(text[:-1]) * 1_000_000)
+        else:
+            return int(float(text))
+    except (ValueError, IndexError):
+        return None
 
 
 def check_domain_in_profile(profile_data: dict, domain: str) -> dict:
