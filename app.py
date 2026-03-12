@@ -12,6 +12,7 @@ Enter a company domain or email address to automatically:
 """
 
 import json
+import re
 from datetime import date, datetime
 
 import streamlit as st
@@ -510,6 +511,128 @@ if run_btn and raw_input and raw_input.strip():
                     if post.get("source"):
                         st.caption(f"Source: {post['source']}")
 
+    # --- Associated Properties ---
+    # Aggregate company website, external links, and app references from all profiles + website
+    associated_properties = []
+    linkedin_website = None
+    seen_assoc_domains = set()
+
+    def _extract_brand(d: str) -> str:
+        """Extract brand name from domain (e.g., 'mytraffic' from 'mytraffic.fr')."""
+        import re as _re
+        d = _re.sub(r"^www\.", "", d.lower())
+        parts = d.split(".")
+        # For subdomains like app.mytraffic.io, use the second-level part
+        if len(parts) >= 3:
+            return parts[-2]
+        return parts[0] if parts else d
+
+    primary_brand = _extract_brand(domain)
+
+    def _is_connected(ext_domain: str) -> bool:
+        """Check if an external domain is connected to the primary domain."""
+        ext_lower = ext_domain.lower()
+        # Direct substring match
+        if domain in ext_lower or ext_lower in domain:
+            return True
+        # Brand name appears anywhere in the external domain
+        # (catches mytraffic.teamtailor.com, app.mytraffic.io, etc.)
+        if primary_brand and len(primary_brand) >= 4 and primary_brand in ext_lower:
+            return True
+        # Brand name match (e.g., mytraffic.fr ↔ mytraffic.io)
+        ext_brand = _extract_brand(ext_domain)
+        if primary_brand and ext_brand and (primary_brand in ext_brand or ext_brand in primary_brand):
+            return True
+        return False
+
+    for label, r in social_results.items():
+        pd = r.get("profile_data", {})
+
+        # LinkedIn company website
+        cw = pd.get("company_website")
+        if cw and not linkedin_website:
+            linkedin_website = cw
+
+        # External links from each profile
+        for ext in pd.get("external_links", []):
+            ext_domain = ext["domain"]
+            if ext_domain not in seen_assoc_domains:
+                seen_assoc_domains.add(ext_domain)
+                associated_properties.append({
+                    **ext,
+                    "found_on": label,
+                    "connected": _is_connected(ext_domain),
+                })
+
+    # External links found on the company website itself
+    for ext in website_info.get("external_links", []):
+        ext_domain = ext["domain"]
+        if ext_domain not in seen_assoc_domains:
+            seen_assoc_domains.add(ext_domain)
+            associated_properties.append({
+                **ext,
+                "found_on": "Company website",
+                "connected": _is_connected(ext_domain),
+            })
+
+    # Also check if LinkedIn website domain differs from primary domain
+    if linkedin_website:
+        lw_parsed = linkedin_website.split("//")[-1].split("/")[0].lower()
+        lw_parsed = re.sub(r"^www\.", "", lw_parsed)
+        if lw_parsed not in seen_assoc_domains and lw_parsed != domain:
+            seen_assoc_domains.add(lw_parsed)
+            associated_properties.insert(0, {
+                "url": linkedin_website,
+                "domain": lw_parsed,
+                "type": "website",
+                "found_on": "LinkedIn (company website)",
+                "connected": _is_connected(lw_parsed),
+            })
+
+    if linkedin_website or associated_properties:
+        st.markdown("---")
+        st.subheader("Associated Properties")
+
+        if linkedin_website:
+            lw_domain = linkedin_website.split("//")[-1].split("/")[0].lower().replace("www.", "")
+            if lw_domain == domain or domain in lw_domain:
+                st.markdown(
+                    f'<div class="check-pass">&#127760; <b>LinkedIn Company Website:</b> '
+                    f'<a href="{linkedin_website}">{linkedin_website}</a> — matches primary domain</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f'<div class="check-warn">&#127760; <b>LinkedIn Company Website:</b> '
+                    f'<a href="{linkedin_website}">{linkedin_website}</a> — '
+                    f'different from primary domain ({domain})</div>',
+                    unsafe_allow_html=True,
+                )
+
+        if associated_properties:
+            connected = [p for p in associated_properties if p["connected"]]
+            not_connected = [p for p in associated_properties if not p["connected"]]
+
+            if connected:
+                st.markdown("**Connected to primary domain:**")
+                for prop in connected:
+                    st.markdown(
+                        f'<div class="check-pass">&#128279; <b>{prop["domain"]}</b> '
+                        f'— <a href="{prop["url"]}">{prop["url"]}</a> '
+                        f'(found on {prop["found_on"]})</div>',
+                        unsafe_allow_html=True,
+                    )
+
+            if not_connected:
+                st.markdown("**Other associated domains:**")
+                for prop in not_connected:
+                    st.markdown(
+                        f'<div class="check-info">&#128279; <b>{prop["domain"]}</b> '
+                        f'— <a href="{prop["url"]}">{prop["url"]}</a> '
+                        f'(found on {prop["found_on"]})</div>',
+                        unsafe_allow_html=True,
+                    )
+
     # --- Reviews ---
     st.markdown("---")
     st.subheader("Reviews")
@@ -674,6 +797,10 @@ if run_btn and raw_input and raw_input.strip():
                 "latest_post_text": r["latest_post"].get("text", "")[:300] if r["latest_post"].get("text") else None,
             }
             for label, r in social_results.items()
+        },
+        "associated_properties": {
+            "linkedin_website": linkedin_website,
+            "external_links": associated_properties,
         },
         "reviews": {
             key: {

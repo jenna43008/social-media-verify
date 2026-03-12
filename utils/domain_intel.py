@@ -71,7 +71,7 @@ def get_domain_age(domain: str) -> dict:
 
 
 def scrape_website_social_links(domain: str) -> dict:
-    """Scrape the company's own website to find social media links.
+    """Scrape the company's own website to find social media links and external domains.
 
     This is the most reliable discovery method — companies link to their
     own social profiles from their homepage/footer.
@@ -79,6 +79,7 @@ def scrape_website_social_links(domain: str) -> dict:
     Returns:
         {
             "social_links": {"linkedin": "url", "facebook": "url", ...},
+            "external_links": [{"url": str, "domain": str, "type": str}, ...],
             "website_reachable": bool,
             "website_title": str,
             "error": str or None,
@@ -86,6 +87,7 @@ def scrape_website_social_links(domain: str) -> dict:
     """
     result = {
         "social_links": {},
+        "external_links": [],
         "website_reachable": False,
         "website_title": "",
         "error": None,
@@ -129,11 +131,13 @@ def scrape_website_social_links(domain: str) -> dict:
         "tiktok": [r"tiktok\.com/@"],
     }
 
+    all_hrefs = []
     for a_tag in soup.find_all("a", href=True):
         href = a_tag["href"].strip()
         if not href.startswith(("http://", "https://")):
             continue
 
+        all_hrefs.append(href)
         href_lower = href.lower()
         for platform, patterns in social_patterns.items():
             if platform not in result["social_links"]:
@@ -144,7 +148,63 @@ def scrape_website_social_links(domain: str) -> dict:
                         result["social_links"][platform] = clean
                         break
 
+    # Extract non-social external links (other domains, app stores, etc.)
+    result["external_links"] = _extract_website_external_links(all_hrefs, domain)
+
     return result
+
+
+def _extract_website_external_links(hrefs: list[str], primary_domain: str) -> list[dict]:
+    """Extract external (non-social, non-self) links from the company website."""
+    SOCIAL_DOMAINS = {
+        "linkedin.com", "facebook.com", "fb.com", "twitter.com", "x.com",
+        "instagram.com", "youtube.com", "youtu.be", "tiktok.com",
+        "github.com", "pinterest.com", "reddit.com", "tumblr.com",
+        "medium.com",
+    }
+    SKIP_DOMAINS = {
+        "google.com", "w3.org", "schema.org", "creativecommons.org",
+        "gravatar.com", "wp.com", "wordpress.org", "cloudflare.com",
+        "cdn.jsdelivr.net", "fonts.googleapis.com", "ajax.googleapis.com",
+        "googletagmanager.com", "google-analytics.com", "gstatic.com",
+        "bootstrapcdn.com", "jquery.com", "cloudfront.net",
+        "amazonaws.com", "cookiebot.com", "onetrust.com",
+    }
+
+    primary_base = re.sub(r"^www\.", "", primary_domain.lower())
+
+    seen_domains = set()
+    results = []
+
+    for href in hrefs:
+        parsed = urlparse(href)
+        hostname = (parsed.hostname or "").lower()
+        hostname = re.sub(r"^www\.", "", hostname)
+
+        if not hostname or len(hostname) < 4:
+            continue
+
+        # Skip self-links (primary domain and subdomains)
+        if hostname == primary_base or hostname.endswith(f".{primary_base}"):
+            continue
+
+        # Skip social media and infrastructure domains
+        if any(sd in hostname for sd in SOCIAL_DOMAINS | SKIP_DOMAINS):
+            continue
+
+        if hostname in seen_domains:
+            continue
+        seen_domains.add(hostname)
+
+        # Categorize
+        is_app_store = "play.google" in hostname or "apps.apple" in hostname
+        results.append({
+            "url": href.split("?")[0].rstrip("/"),
+            "domain": hostname,
+            "type": "app_store" if is_app_store else "website",
+        })
+
+    return results
 
 
 def check_dns_records(domain: str) -> dict:

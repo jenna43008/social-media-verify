@@ -49,6 +49,12 @@ def scrape_profile(html: str, platform: str | None = None) -> dict:
     # Extract follower count (platform-specific)
     followers = _extract_follower_count(soup, description, raw_text, platform)
 
+    # Extract company website from LinkedIn profiles
+    company_website = _extract_company_website(soup, description, raw_text, og_data, platform)
+
+    # Extract external links (non-social, non-platform links)
+    external_links = _extract_external_links(links_found, platform)
+
     return {
         "title": title,
         "description": description,
@@ -57,6 +63,8 @@ def scrape_profile(html: str, platform: str | None = None) -> dict:
         "raw_text": raw_text,
         "og_data": og_data,
         "followers": followers,
+        "company_website": company_website,
+        "external_links": external_links,
     }
 
 
@@ -206,6 +214,111 @@ def _parse_abbreviated_number(text: str) -> int | None:
             return int(float(text))
     except (ValueError, IndexError):
         return None
+
+
+def _extract_company_website(
+    soup: BeautifulSoup, description: str, raw_text: str,
+    og_data: dict, platform: str | None,
+) -> str | None:
+    """Extract the company website URL from a profile page.
+
+    LinkedIn company pages typically show the website in:
+      - og:url or og:see_also meta tags
+      - Meta description (e.g., "Visit us at example.com")
+      - Link elements with specific data attributes
+      - The raw text / about section
+    """
+    if platform != "linkedin":
+        return None
+
+    # LinkedIn: check for website link in the page
+    # The og:see_also or data-tracking attributes often contain it
+    for a_tag in soup.find_all("a", href=True):
+        href = a_tag["href"].strip()
+        # LinkedIn wraps external links in tracking URLs
+        if "linkedin.com/redir" in href or "lnkd.in" in href:
+            continue
+        if not href.startswith(("http://", "https://")):
+            continue
+        hostname = (urlparse(href).hostname or "").lower()
+        # Skip social media and LinkedIn's own URLs
+        if any(s in hostname for s in [
+            "linkedin.com", "facebook.com", "twitter.com", "x.com",
+            "instagram.com", "youtube.com", "tiktok.com", "github.com",
+            "google.com", "apple.com", "play.google.com",
+        ]):
+            continue
+        # This is likely the company website
+        return href
+
+    # Try extracting from meta description or raw text
+    # Pattern: "Visit example.com" or "website: example.com"
+    url_pattern = r"(?:website|visit|at|visit us at)\s*[:.]?\s*(https?://[^\s,)]+|(?:www\.)?[a-z0-9-]+\.[a-z]{2,}[^\s,)]*)"
+    for text_source in [description, raw_text[:2000]]:
+        match = re.search(url_pattern, text_source, re.IGNORECASE)
+        if match:
+            url = match.group(1)
+            if not url.startswith("http"):
+                url = f"https://{url}"
+            return url
+
+    # Check OG metadata for website references
+    for key, val in og_data.items():
+        if key in ("og:url", "og:see_also"):
+            parsed = urlparse(val)
+            if parsed.hostname and "linkedin.com" not in (parsed.hostname or ""):
+                return val
+
+    return None
+
+
+def _extract_external_links(links_found: list[str], platform: str | None) -> list[dict]:
+    """Categorize external links found on a profile page.
+
+    Filters out the platform's own links and common social media URLs.
+    Returns unique external domains with their full URLs.
+    """
+    SOCIAL_DOMAINS = {
+        "linkedin.com", "facebook.com", "fb.com", "twitter.com", "x.com",
+        "instagram.com", "youtube.com", "youtu.be", "tiktok.com",
+        "github.com", "pinterest.com", "reddit.com", "tumblr.com",
+        "medium.com",
+    }
+    SKIP_DOMAINS = {
+        "google.com", "apple.com", "play.google.com", "apps.apple.com",
+        "w3.org", "schema.org", "creativecommons.org", "gravatar.com",
+        "wp.com", "wordpress.org", "cloudflare.com", "cdn.jsdelivr.net",
+        "fonts.googleapis.com", "ajax.googleapis.com",
+    }
+
+    seen_domains = set()
+    results = []
+
+    for link in links_found:
+        parsed = urlparse(link)
+        hostname = (parsed.hostname or "").lower()
+        hostname = re.sub(r"^www\.", "", hostname)
+
+        if not hostname or len(hostname) < 4:
+            continue
+
+        # Skip social media and infrastructure domains
+        if any(sd in hostname for sd in SOCIAL_DOMAINS | SKIP_DOMAINS):
+            continue
+
+        if hostname in seen_domains:
+            continue
+        seen_domains.add(hostname)
+
+        # Categorize
+        is_app_store = "play.google" in hostname or "apps.apple" in hostname
+        results.append({
+            "url": link.split("?")[0].rstrip("/"),
+            "domain": hostname,
+            "type": "app_store" if is_app_store else "website",
+        })
+
+    return results
 
 
 def check_domain_in_profile(profile_data: dict, domain: str) -> dict:
