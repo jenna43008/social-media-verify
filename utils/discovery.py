@@ -134,15 +134,27 @@ def _extract_domain_slug(domain: str) -> list[str]:
     return list(dict.fromkeys(slugs))  # dedupe preserving order
 
 
-def discover_social_profiles(domain: str, progress_callback=None) -> dict:
+def discover_social_profiles(
+    domain: str,
+    website_social_links: dict | None = None,
+    progress_callback=None,
+) -> dict:
     """Discover social media profiles for a given domain.
 
-    Uses Google/DuckDuckGo search + direct URL pattern matching.
+    Priority order:
+      1. Links found on the company's own website (most reliable)
+      2. Search engine results
+      3. Direct URL pattern matching
+
+    Args:
+        domain: The company's domain (e.g., "acme.com")
+        website_social_links: Dict of platform->url scraped from the company's
+            own website by domain_intel.scrape_website_social_links().
+        progress_callback: Optional function to report progress.
 
     Returns a dict keyed by platform:
         {
-            "linkedin": {"url": "...", "source": "search" | "pattern", "verified": bool},
-            "facebook": {...},
+            "linkedin": {"url": "...", "source": "website" | "search" | "pattern", ...},
             ...
         }
     """
@@ -151,6 +163,7 @@ def discover_social_profiles(domain: str, progress_callback=None) -> dict:
     domain = re.sub(r"^www\.", "", domain)
     domain = domain.rstrip("/")
 
+    website_social_links = website_social_links or {}
     slugs = _extract_domain_slug(domain)
     results = {}
 
@@ -161,29 +174,35 @@ def discover_social_profiles(domain: str, progress_callback=None) -> dict:
         found_url = None
         source = None
 
-        # Strategy 1: Search engines
-        query = platform_info["search_query"].format(domain=domain)
+        # Strategy 1: Use link from company's own website (most reliable)
+        if platform_key in website_social_links:
+            candidate = website_social_links[platform_key]
+            if _check_url_exists(candidate):
+                found_url = candidate
+                source = "company website"
 
-        # Try Google first, then DuckDuckGo
-        search_urls = _search_google(query)
-        if not search_urls:
-            time.sleep(0.5)
-            search_urls = _search_duckduckgo(query)
+        # Strategy 2: Search engines
+        if not found_url:
+            query = platform_info["search_query"].format(domain=domain)
 
-        # Filter to the target platform domain
-        platform_domains = _get_platform_domains(platform_key)
-        for url in search_urls:
-            parsed = urlparse(url)
-            hostname = (parsed.hostname or "").lower()
-            if any(pd in hostname for pd in platform_domains):
-                # Prefer company pages over personal profiles on LinkedIn
-                if platform_key == "linkedin" and "/company/" not in url:
-                    continue
-                found_url = url
-                source = "search"
-                break
+            # Try Google first, then DuckDuckGo
+            search_urls = _search_google(query)
+            if not search_urls:
+                time.sleep(0.5)
+                search_urls = _search_duckduckgo(query)
 
-        # Strategy 2: Direct URL pattern matching (fallback)
+            platform_domains = _get_platform_domains(platform_key)
+            for url in search_urls:
+                parsed = urlparse(url)
+                hostname = (parsed.hostname or "").lower()
+                if any(pd in hostname for pd in platform_domains):
+                    if platform_key == "linkedin" and "/company/" not in url:
+                        continue
+                    found_url = url
+                    source = "search"
+                    break
+
+        # Strategy 3: Direct URL pattern matching (fallback)
         if not found_url:
             for slug in slugs:
                 for pattern in platform_info["direct_patterns"]:
@@ -200,10 +219,9 @@ def discover_social_profiles(domain: str, progress_callback=None) -> dict:
                 "url": found_url,
                 "label": platform_info["label"],
                 "source": source,
-                "verified": False,  # will be set after full verification
+                "verified": False,
             }
 
-        # Brief pause between platforms to avoid rate limiting
         time.sleep(0.3)
 
     return results
