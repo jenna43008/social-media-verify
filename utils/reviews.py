@@ -38,7 +38,7 @@ REVIEW_PLATFORMS = {
     },
     "glassdoor": {
         "label": "Glassdoor",
-        "search_query": '"{company}" site:glassdoor.com',
+        "search_query": '"{company}" employer reviews site:glassdoor.com',
         "icon": "🪟",
     },
     "g2": {
@@ -156,6 +156,71 @@ def _extract_bbb_data(html: str) -> dict:
     return data
 
 
+def _extract_glassdoor_data(html: str) -> dict:
+    """Extract employer rating data from a Glassdoor page."""
+    import json as _json
+
+    data = {
+        "rating": None,
+        "review_count": None,
+        "summary": None,
+        "recommend_pct": None,
+        "ceo_approval": None,
+    }
+    soup = BeautifulSoup(html, "lxml")
+
+    # 1. JSON-LD aggregateRating (most reliable)
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            ld = _json.loads(script.string or "")
+            items = ld if isinstance(ld, list) else [ld]
+            for item in items:
+                agg = item.get("aggregateRating")
+                if agg:
+                    data["rating"] = str(agg.get("ratingValue", ""))
+                    data["review_count"] = str(agg.get("reviewCount", ""))
+                    break
+        except Exception:
+            pass
+
+    # 2. OG description often contains a rating summary
+    og_desc = soup.find("meta", property="og:description")
+    if og_desc and og_desc.get("content"):
+        content = og_desc["content"]
+        data["summary"] = content[:200]
+
+        if not data["rating"]:
+            m = re.search(r"(\d+\.?\d*)\s*(?:out of 5|/5|rating|stars)", content, re.I)
+            if m:
+                data["rating"] = m.group(1)
+        if not data["review_count"]:
+            m = re.search(r"([\d,]+)\s+reviews?", content, re.I)
+            if m:
+                data["review_count"] = m.group(1)
+
+    # 3. Page text for recommend % and CEO approval
+    text = soup.get_text(separator=" ", strip=True)[:5000]
+
+    rec_match = re.search(r"(\d+)%\s*(?:recommend|Recommend)", text)
+    if rec_match:
+        data["recommend_pct"] = rec_match.group(1)
+
+    ceo_match = re.search(
+        r"(\d+)%\s*(?:CEO\s*)?[Aa]pproval|(?:CEO|ceo)\s*(?:approval|rating)\s*:?\s*(\d+)%",
+        text,
+    )
+    if ceo_match:
+        data["ceo_approval"] = ceo_match.group(1) or ceo_match.group(2)
+
+    # 4. Fallback: title tag often has "X.X Rating" for Glassdoor
+    if not data["rating"] and soup.title and soup.title.string:
+        m = re.search(r"(\d+\.?\d*)\s*(?:rating|star)", soup.title.string, re.I)
+        if m:
+            data["rating"] = m.group(1)
+
+    return data
+
+
 def _extract_generic_review_data(html: str) -> dict:
     """Extract review data from generic review pages using common patterns."""
     data = {"rating": None, "review_count": None, "summary": None}
@@ -244,6 +309,8 @@ def discover_reviews(domain: str, company_name: str = "", progress_callback=None
                         data = _extract_trustpilot_data(html)
                     elif key == "bbb":
                         data = _extract_bbb_data(html)
+                    elif key == "glassdoor":
+                        data = _extract_glassdoor_data(html)
                     else:
                         data = _extract_generic_review_data(html)
 

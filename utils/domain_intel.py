@@ -115,6 +115,7 @@ def scrape_website_social_links(domain: str) -> dict:
         return result
 
     result["website_reachable"] = True
+    result["final_url"] = resp.url
     soup = BeautifulSoup(resp.text, "lxml")
 
     if soup.title and soup.title.string:

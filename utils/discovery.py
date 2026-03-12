@@ -238,11 +238,25 @@ def _get_platform_domains(platform_key: str) -> list[str]:
     return mapping.get(platform_key, [])
 
 
-def discover_employees(domain: str, company_name: str = "", progress_callback=None) -> list[dict]:
-    """Search for employee profiles linked to the company.
+def discover_employees(
+    domain: str,
+    company_name: str = "",
+    redirect_domain: str | None = None,
+    glassdoor_data: dict | None = None,
+    progress_callback=None,
+) -> dict:
+    """Search for employee profiles and employer signals across multiple platforms.
 
-    Returns a list of dicts:
-        [{"name": "...", "title": "...", "url": "...", "platform": "linkedin"}, ...]
+    Returns a dict:
+        {
+            "linkedin_profiles": [{"name", "title", "url", "platform"}, ...],
+            "employer_signals": {
+                "indeed": {"found": bool, "url", "rating", "review_count"},
+                "comparably": {"found": bool, "url", "rating"},
+            },
+            "glassdoor": {"rating", "review_count", "recommend_pct", "ceo_approval"} | {},
+            "redirect_domain": str | None,
+        }
     """
     domain = domain.lower().strip()
     domain = re.sub(r"^https?://", "", domain)
@@ -250,25 +264,42 @@ def discover_employees(domain: str, company_name: str = "", progress_callback=No
     domain = domain.rstrip("/")
 
     company_base = company_name or domain.split(".")[0]
-    employees = []
+    redirect_base = redirect_domain.split(".")[0] if redirect_domain else None
 
+    result = {
+        "linkedin_profiles": [],
+        "employer_signals": {},
+        "glassdoor": {},
+        "redirect_domain": redirect_domain,
+    }
+
+    # --- LinkedIn employee search ---
     if progress_callback:
-        progress_callback("Searching for employee profiles...")
+        progress_callback("Searching for employee profiles on LinkedIn...")
 
-    # Search for LinkedIn profiles mentioning the company
     queries = [
         f'"{company_base}" site:linkedin.com/in/',
+        f'"{company_base}" "current" site:linkedin.com/in/',
     ]
-    if company_name and company_name.lower() != domain.split(".")[0].lower():
+
+    if company_name and company_name.lower() != company_base.lower():
         queries.append(f'"{company_name}" site:linkedin.com/in/')
 
+    # If redirect domain has a different brand, search that too
+    if redirect_base and redirect_base.lower() != company_base.lower():
+        queries.append(f'"{redirect_base}" site:linkedin.com/in/')
+
+    # Cap queries to avoid rate limits
+    queries = queries[:4]
+
     seen_urls = set()
+    employees = []
 
     for query in queries:
-        search_urls = _search_google(query, max_results=20)
+        search_urls = _search_google(query, max_results=15)
         if not search_urls:
             time.sleep(0.5)
-            search_urls = _search_duckduckgo(query, max_results=20)
+            search_urls = _search_duckduckgo(query, max_results=15)
 
         for url in search_urls:
             parsed = urlparse(url)
@@ -279,16 +310,12 @@ def discover_employees(domain: str, company_name: str = "", progress_callback=No
             if "/in/" not in url:
                 continue
 
-            # Normalize URL
             clean_url = url.split("?")[0].rstrip("/")
             if clean_url in seen_urls:
                 continue
             seen_urls.add(clean_url)
 
-            # Try to extract name from URL
             name = _name_from_linkedin_url(clean_url)
-
-            # Try to get title from page
             title = _get_employee_title(clean_url, company_base)
 
             employees.append({
@@ -300,7 +327,102 @@ def discover_employees(domain: str, company_name: str = "", progress_callback=No
 
         time.sleep(0.3)
 
-    return employees
+    result["linkedin_profiles"] = employees
+
+    # --- Employer platform signals ---
+    if progress_callback:
+        progress_callback("Checking employer review platforms...")
+
+    search_name = company_name or company_base
+
+    # Indeed company page
+    result["employer_signals"]["indeed"] = _check_employer_platform(
+        search_name, "indeed.com", "/cmp/", redirect_base,
+    )
+    time.sleep(0.3)
+
+    # Comparably company page
+    result["employer_signals"]["comparably"] = _check_employer_platform(
+        search_name, "comparably.com", "/company/", redirect_base,
+    )
+
+    # --- Glassdoor data (passed from reviews phase if available) ---
+    if glassdoor_data and glassdoor_data.get("found"):
+        result["glassdoor"] = {
+            "rating": glassdoor_data.get("rating"),
+            "review_count": glassdoor_data.get("review_count"),
+            "recommend_pct": glassdoor_data.get("recommend_pct"),
+            "ceo_approval": glassdoor_data.get("ceo_approval"),
+            "url": glassdoor_data.get("url"),
+        }
+
+    return result
+
+
+def _check_employer_platform(
+    company_name: str,
+    platform_domain: str,
+    path_hint: str,
+    alt_name: str | None = None,
+) -> dict:
+    """Search for a company on an employer review platform.
+
+    Returns {"found": bool, "url": str|None, "rating": str|None, "review_count": str|None}
+    """
+    entry = {"found": False, "url": None, "rating": None, "review_count": None}
+
+    names = [company_name]
+    if alt_name and alt_name.lower() != company_name.lower():
+        names.append(alt_name)
+
+    for name in names:
+        query = f'"{name}" site:{platform_domain}{path_hint}'
+        urls = _search_duckduckgo(query, max_results=3)
+
+        for url in urls:
+            if platform_domain not in url.lower():
+                continue
+
+            try:
+                resp = requests.get(url, headers=HEADERS, timeout=10, allow_redirects=True)
+                if resp.status_code == 200:
+                    soup = BeautifulSoup(resp.text, "lxml")
+                    entry["found"] = True
+                    entry["url"] = url.split("?")[0].rstrip("/")
+
+                    # Try JSON-LD aggregateRating
+                    import json as _json
+                    for script in soup.find_all("script", type="application/ld+json"):
+                        try:
+                            ld = _json.loads(script.string or "")
+                            items = ld if isinstance(ld, list) else [ld]
+                            for item in items:
+                                agg = item.get("aggregateRating")
+                                if agg:
+                                    entry["rating"] = str(agg.get("ratingValue", ""))
+                                    entry["review_count"] = str(agg.get("reviewCount", ""))
+                                    break
+                        except Exception:
+                            pass
+
+                    # Fallback: OG description
+                    if not entry["rating"]:
+                        og = soup.find("meta", property="og:description")
+                        if og and og.get("content"):
+                            m = re.search(
+                                r"(\d+\.?\d*)\s*(?:out of 5|/5|rating|stars)",
+                                og["content"], re.I,
+                            )
+                            if m:
+                                entry["rating"] = m.group(1)
+
+                    return entry  # found — stop searching
+            except Exception:
+                pass
+
+        time.sleep(0.3)
+
+    return entry
 
 
 def _name_from_linkedin_url(url: str) -> str:

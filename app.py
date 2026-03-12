@@ -14,6 +14,7 @@ Enter a company domain or email address to automatically:
 import json
 import re
 from datetime import date, datetime
+from urllib.parse import urlparse
 
 import streamlit as st
 
@@ -155,6 +156,14 @@ if run_btn and raw_input and raw_input.strip():
         "historical_dns": historical_dns,
     }
 
+    # Detect redirect domain (e.g., mytraffic.fr → mytraffic.io)
+    redirect_domain = None
+    if website_info.get("final_url"):
+        final_host = urlparse(website_info["final_url"]).hostname or ""
+        final_host = re.sub(r"^www\.", "", final_host.lower())
+        if final_host and final_host != domain:
+            redirect_domain = final_host
+
     # ==================================================================
     # PHASE 2: Social Profile Discovery & Verification
     # ==================================================================
@@ -225,7 +234,14 @@ if run_btn and raw_input and raw_input.strip():
     # ==================================================================
     update("Searching for employee profiles...", 75)
 
-    employees = discover_employees(domain, company_name, progress_callback=lambda m: update(m))
+    glassdoor_review = reviews.get("glassdoor", {})
+    employees = discover_employees(
+        domain,
+        company_name,
+        redirect_domain=redirect_domain,
+        glassdoor_data=glassdoor_review if glassdoor_review.get("found") else None,
+        progress_callback=lambda m: update(m),
+    )
 
     # ==================================================================
     # PHASE 6: Person Intelligence (email mode only)
@@ -434,6 +450,11 @@ if run_btn and raw_input and raw_input.strip():
         st.markdown("**Website**")
         if website_info.get("website_reachable"):
             st.markdown('<div class="check-pass">Website is live</div>', unsafe_allow_html=True)
+            if redirect_domain:
+                st.markdown(
+                    f'<div class="check-warn">Redirects to <b>{redirect_domain}</b></div>',
+                    unsafe_allow_html=True,
+                )
             link_count = len(website_info.get("social_links", {}))
             if link_count:
                 st.markdown(f'<div class="check-info">{link_count} social link(s) found on site</div>', unsafe_allow_html=True)
@@ -734,17 +755,69 @@ if run_btn and raw_input and raw_input.strip():
     if tech_score["signals_found"] == 0:
         st.info("No developer or startup signals found.")
 
-    # --- Employees ---
+    # --- Employees & Employer Signals ---
     st.markdown("---")
-    st.subheader("Employee Profiles")
+    st.subheader("Employee & Employer Signals")
 
-    if employees:
-        st.success(f"Found {len(employees)} employee profile(s)")
-        for emp in employees:
+    if redirect_domain:
+        st.info(f"Domain redirect detected: **{domain}** → **{redirect_domain}**. Both names searched.")
+
+    # LinkedIn profiles
+    linkedin_profiles = employees.get("linkedin_profiles", [])
+    if linkedin_profiles:
+        st.success(f"Found {len(linkedin_profiles)} employee profile(s) on LinkedIn")
+        for emp in linkedin_profiles:
             title_str = f" — {emp['title']}" if emp.get("title") else ""
             st.markdown(f"**{emp['name']}**{title_str} — [{emp['url']}]({emp['url']})")
-    else:
-        st.info("No employee profiles discovered via search.")
+
+    # Glassdoor employer data
+    gd = employees.get("glassdoor", {})
+    if gd.get("rating"):
+        try:
+            gd_rating = float(str(gd["rating"]).replace(",", "."))
+        except (ValueError, TypeError):
+            gd_rating = 0
+        gd_css = "check-pass" if gd_rating >= 4.0 else "check-warn" if gd_rating >= 3.0 else "check-fail"
+        gd_count = gd.get("review_count", "?")
+        gd_url = gd.get("url", "")
+        link_str = f' — <a href="{gd_url}">{gd_url}</a>' if gd_url else ""
+        st.markdown(
+            f'<div class="{gd_css}">&#11088; <b>Glassdoor:</b> {gd["rating"]}/5 '
+            f'({gd_count} reviews){link_str}</div>',
+            unsafe_allow_html=True,
+        )
+        extras = []
+        if gd.get("recommend_pct"):
+            extras.append(f"{gd['recommend_pct']}% recommend to a friend")
+        if gd.get("ceo_approval"):
+            extras.append(f"{gd['ceo_approval']}% CEO approval")
+        if extras:
+            st.caption(" · ".join(extras))
+
+    # Indeed and Comparably signals
+    employer_signals = employees.get("employer_signals", {})
+    for key, signal in employer_signals.items():
+        if signal.get("found"):
+            label = key.replace("_", " ").title()
+            parts = [f"&#9989; <b>{label}</b>"]
+            if signal.get("rating"):
+                parts.append(f"Rating: {signal['rating']}/5")
+            if signal.get("review_count"):
+                parts.append(f"({signal['review_count']} reviews)")
+            if signal.get("url"):
+                parts.append(f'— <a href="{signal["url"]}">{signal["url"]}</a>')
+            st.markdown(
+                f'<div class="check-pass">{" ".join(parts)}</div>',
+                unsafe_allow_html=True,
+            )
+
+    has_any = (
+        linkedin_profiles
+        or gd.get("rating")
+        or any(s.get("found") for s in employer_signals.values())
+    )
+    if not has_any:
+        st.info("No employee profiles or employer signals discovered.")
 
     # --- Export ---
     st.markdown("---")
