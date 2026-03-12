@@ -464,16 +464,30 @@ def calculate_tech_score(signals: dict) -> dict:
         blog_type = signals["tech_blog"].get("type", "blog")
         flags.append(f"Has {blog_type.replace('_', ' ')}")
 
-    is_likely_tech = signals_found >= 2 and (
+    is_tech = signals_found >= 2 and (
         gh.get("found") or signals.get("npm", {}).get("found")
     )
+
+    # Determine company maturity: "established" vs "early_stage" vs "non_tech"
+    # Established = strong tech signals (many repos, packages, multiple platforms)
+    # Early-stage = some tech signals but limited scale
+    gh_repos = gh.get("public_repos", 0) if gh.get("found") else 0
+    gh_followers = gh.get("followers", 0) if gh.get("found") else 0
+
+    if is_tech and (gh_repos >= 20 or gh_followers >= 100 or signals_found >= 4):
+        maturity = "established"
+    elif is_tech:
+        maturity = "early_stage"
+    else:
+        maturity = "non_tech"
 
     if signals_found == 0:
         flags.append("No tech/developer signals found")
 
     return {
         "score": min(score, 100),
-        "is_likely_tech_company": is_likely_tech,
+        "is_likely_tech_company": is_tech,
+        "maturity": maturity,
         "signals_found": signals_found,
         "flags": flags,
     }

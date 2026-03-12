@@ -238,8 +238,10 @@ if run_btn and domain and domain.strip():
     with hero_col3:
         st.markdown("**Assessment Summary**")
         st.markdown(risk["recommendation"])
-        if risk["is_startup"]:
-            st.info("This entity was detected as a tech/startup company. Risk weights have been adjusted to account for typically lower social media presence in early-stage companies.")
+        if risk.get("maturity") == "established":
+            st.success("Identified as an established tech company. Standard scoring weights applied — social presence and reviews are expected.")
+        elif risk["is_startup"]:
+            st.info("Detected as an early-stage startup. Risk weights adjusted to account for typically lower social media presence in new companies.")
 
     # --- Score Breakdown ---
     st.markdown("---")

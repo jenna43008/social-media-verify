@@ -52,10 +52,16 @@ def calculate_overall_risk(
             "recommendation": str,
         }
     """
-    is_startup = tech_score.get("is_likely_tech_company", False)
+    maturity = tech_score.get("maturity", "non_tech")
+    is_early_stage = maturity == "early_stage"
 
-    # Adjust weights for startups
-    if is_startup:
+    # Weight adjustments based on company maturity:
+    #   - Established tech (Stripe, Google, etc.): standard weights — they
+    #     SHOULD have social presence and reviews, so hold them to it.
+    #   - Early-stage startup: shift weight toward tech signals because
+    #     limited social/review presence is expected.
+    #   - Non-tech: standard weights.
+    if is_early_stage:
         weights = {
             "social": 0.15,
             "reviews": 0.15,
@@ -137,11 +143,13 @@ def calculate_overall_risk(
     if age_score < 30:
         flags.append("Social accounts may be too new relative to denial date")
 
-    if is_startup:
-        flags.insert(0, "Detected as tech/startup company — weights adjusted")
+    if is_early_stage:
+        flags.insert(0, "Detected as early-stage startup — weights adjusted to favor tech signals")
+    elif maturity == "established":
+        flags.insert(0, "Established tech company — standard weight applied across all dimensions")
 
     # Generate recommendation
-    recommendation = _generate_recommendation(overall, tier, is_startup, flags, breakdown)
+    recommendation = _generate_recommendation(overall, tier, is_early_stage, maturity, flags, breakdown)
 
     return {
         "overall_score": round(overall, 1),
@@ -149,7 +157,8 @@ def calculate_overall_risk(
         "tier_info": TIERS[tier],
         "breakdown": breakdown,
         "flags": flags,
-        "is_startup": is_startup,
+        "is_startup": is_early_stage,
+        "maturity": maturity,
         "recommendation": recommendation,
     }
 
@@ -267,7 +276,8 @@ def _calculate_age_score(social_results: dict, denial_date: date | None) -> floa
 
 
 def _generate_recommendation(
-    score: float, tier: str, is_startup: bool, flags: list, breakdown: dict
+    score: float, tier: str, is_early_stage: bool, maturity: str,
+    flags: list, breakdown: dict,
 ) -> str:
     """Generate a human-readable recommendation."""
     parts = []
@@ -276,9 +286,13 @@ def _generate_recommendation(
         parts.append(
             "This entity shows strong legitimacy indicators across multiple dimensions."
         )
-        if is_startup:
+        if maturity == "established":
             parts.append(
-                "Despite being identified as a tech startup, it has established "
+                "Identified as an established tech company with strong digital presence."
+            )
+        elif is_early_stage:
+            parts.append(
+                "Despite being an early-stage startup, it has established "
                 "verifiable digital presence."
             )
         parts.append("Standard processing is recommended.")
@@ -287,15 +301,14 @@ def _generate_recommendation(
         parts.append(
             "This entity shows moderate legitimacy signals with some gaps."
         )
-        # Find weakest area
         weakest = min(breakdown.items(), key=lambda x: x[1]["score"])
         parts.append(
             f"The weakest area is {weakest[0]} (score: {weakest[1]['score']:.0f}/100)."
         )
-        if is_startup:
+        if is_early_stage:
             parts.append(
-                "Note: This appears to be a tech startup. Limited social presence "
-                "is common for early-stage companies — tech signals have been weighted higher."
+                "Note: This appears to be an early-stage startup. Limited social presence "
+                "is common for new companies — tech signals have been weighted higher."
             )
         parts.append("Targeted follow-up on flagged areas is recommended.")
 
@@ -304,9 +317,9 @@ def _generate_recommendation(
             "This entity shows limited legitimacy signals. Enhanced due diligence "
             "is strongly recommended."
         )
-        if is_startup:
+        if is_early_stage:
             parts.append(
-                "Even with startup adjustments, legitimacy signals are sparse."
+                "Even with early-stage startup adjustments, legitimacy signals are sparse."
             )
         weak_areas = [
             k for k, v in breakdown.items() if v["score"] < 30
